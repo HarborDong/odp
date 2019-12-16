@@ -4,8 +4,6 @@
  * SPDX-License-Identifier:     BSD-3-Clause
  */
 
-#include "config.h"
-
 #include <odp/api/ipsec.h>
 #include <odp/api/chksum.h>
 
@@ -34,6 +32,11 @@ int odp_ipsec_capability(odp_ipsec_capability_t *capa)
 	int rc;
 	odp_crypto_capability_t crypto_capa;
 	odp_queue_capability_t queue_capa;
+
+	if (odp_global_ro.disable.ipsec) {
+		ODP_ERR("IPSec is disabled\n");
+		return -1;
+	}
 
 	memset(capa, 0, sizeof(odp_ipsec_capability_t));
 
@@ -780,7 +783,7 @@ static ipsec_sa_t *ipsec_in_single(odp_packet_t pkt,
 	    ODP_IPSEC_MODE_TUNNEL == ipsec_sa->mode) {
 		odp_packet_hdr_t *pkt_hdr = packet_hdr(pkt);
 
-		packet_parse_reset(pkt_hdr);
+		packet_parse_reset(pkt_hdr, 0);
 		pkt_hdr->p.l3_offset = state.ip_offset;
 	} else {
 		odp_packet_parse_param_t parse_param;
@@ -1777,6 +1780,9 @@ int _odp_ipsec_try_inline(odp_packet_t *pkt)
 	odp_ipsec_packet_result_t *result;
 	odp_packet_hdr_t *pkt_hdr;
 
+	if (odp_global_ro.disable.ipsec)
+		return -1;
+
 	memset(&status, 0, sizeof(status));
 
 	ipsec_sa = ipsec_in_single(*pkt, ODP_IPSEC_SA_INVALID, pkt, &status);
@@ -1939,6 +1945,9 @@ int _odp_ipsec_init_global(void)
 {
 	odp_shm_t shm;
 
+	if (odp_global_ro.disable.ipsec)
+		return 0;
+
 	shm = odp_shm_reserve("_odp_ipsec", sizeof(odp_ipsec_config_t),
 			      ODP_CACHE_LINE_SIZE, 0);
 
@@ -1962,7 +1971,12 @@ int _odp_ipsec_init_global(void)
 
 int _odp_ipsec_term_global(void)
 {
-	odp_shm_t shm = odp_shm_lookup("_odp_ipsec");
+	odp_shm_t shm;
+
+	if (odp_global_ro.disable.ipsec)
+		return 0;
+
+	shm = odp_shm_lookup("_odp_ipsec");
 
 	if (shm == ODP_SHM_INVALID || odp_shm_free(shm)) {
 		ODP_ERR("Shm free failed for odp_ipsec");

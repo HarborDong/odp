@@ -1,11 +1,9 @@
-/* Copyright (c) 2019, Nokia
- * Copyright (c) 2013-2018, Linaro Limited
+/* Copyright (c) 2013-2018, Linaro Limited
+ * Copyright (c) 2019, Nokia
  * All rights reserved.
  *
  * SPDX-License-Identifier:     BSD-3-Clause
  */
-
-#include "config.h"
 
 #include <odp/api/pool.h>
 #include <odp/api/shared_memory.h>
@@ -46,10 +44,6 @@
 /* Define a practical limit for contiguous memory allocations */
 #define MAX_SIZE   (10 * 1024 * 1024)
 
-/* Minimum supported buffer alignment. Requests for values below this will be
- * rounded up to this value. */
-#define BUFFER_ALIGN_MIN ODP_CACHE_LINE_SIZE
-
 ODP_STATIC_ASSERT(CONFIG_PACKET_SEG_LEN_MIN >= 256,
 		  "ODP Segment size must be a minimum of 256 bytes");
 
@@ -62,7 +56,7 @@ typedef struct pool_local_t {
 	int thr_id;
 } pool_local_t;
 
-pool_table_t *pool_tbl;
+pool_global_t *_odp_pool_glb;
 static __thread pool_local_t local;
 
 #include <odp/visibility_begin.h>
@@ -91,8 +85,8 @@ static inline void cache_init(pool_cache_t *cache)
 {
 	memset(cache, 0, sizeof(pool_cache_t));
 
-	cache->size = pool_tbl->config.local_cache_size;
-	cache->burst_size = pool_tbl->config.burst_size;
+	cache->size = _odp_pool_glb->config.local_cache_size;
+	cache->burst_size = _odp_pool_glb->config.burst_size;
 }
 
 static inline uint32_t cache_pop(pool_cache_t *cache,
@@ -142,8 +136,9 @@ static void cache_flush(pool_cache_t *cache, pool_t *pool)
 		ring_ptr_enq(ring, mask, buf_hdr);
 }
 
-static int read_config_file(pool_table_t *pool_tbl)
+static int read_config_file(pool_global_t *pool_glb)
 {
+	uint32_t local_cache_size, burst_size, align;
 	const char *str;
 	int val = 0;
 
@@ -156,12 +151,13 @@ static int read_config_file(pool_table_t *pool_tbl)
 	}
 
 	if (val > CONFIG_POOL_CACHE_MAX_SIZE || val < 0) {
-		ODP_ERR("Bad value %s = %u, max %d\n", str, val,
+		ODP_ERR("Bad value %s = %i, max %i\n", str, val,
 			CONFIG_POOL_CACHE_MAX_SIZE);
 		return -1;
 	}
 
-	pool_tbl->config.local_cache_size = val;
+	local_cache_size = val;
+	pool_glb->config.local_cache_size = local_cache_size;
 	ODP_PRINT("  %s: %i\n", str, val);
 
 	str = "pool.burst_size";
@@ -171,22 +167,21 @@ static int read_config_file(pool_table_t *pool_tbl)
 	}
 
 	if (val <= 0) {
-		ODP_ERR("Bad value %s = %u\n", str, val);
+		ODP_ERR("Bad value %s = %i\n", str, val);
 		return -1;
 	}
 
-	pool_tbl->config.burst_size = val;
+	burst_size = val;
+	pool_glb->config.burst_size = burst_size;
 	ODP_PRINT("  %s: %i\n", str, val);
 
 	/* Check local cache size and burst size relation */
-	if (pool_tbl->config.local_cache_size % pool_tbl->config.burst_size) {
+	if (local_cache_size % burst_size) {
 		ODP_ERR("Pool cache size not multiple of burst size\n");
 		return -1;
 	}
 
-	if (pool_tbl->config.local_cache_size &&
-	    (pool_tbl->config.local_cache_size /
-	     pool_tbl->config.burst_size < 2)) {
+	if (local_cache_size && (local_cache_size / burst_size < 2)) {
 		ODP_ERR("Cache burst size too large compared to cache size\n");
 		return -1;
 	}
@@ -198,38 +193,75 @@ static int read_config_file(pool_table_t *pool_tbl)
 	}
 
 	if (val > CONFIG_POOL_MAX_NUM || val < POOL_MAX_NUM_MIN) {
-		ODP_ERR("Bad value %s = %u\n", str, val);
+		ODP_ERR("Bad value %s = %i\n", str, val);
 		return -1;
 	}
 
-	pool_tbl->config.pkt_max_num = val;
+	pool_glb->config.pkt_max_num = val;
 	ODP_PRINT("  %s: %i\n", str, val);
+
+	str = "pool.pkt.base_align";
+	if (!_odp_libconfig_lookup_int(str, &val)) {
+		ODP_ERR("Config option '%s' not found.\n", str);
+		return -1;
+	}
+
+	align = val;
+	if (val == 0)
+		align = ODP_CACHE_LINE_SIZE;
+
+	if (!CHECK_IS_POWER2(align)) {
+		ODP_ERR("Not a power of two: %s = %i\n", str, val);
+		return -1;
+	}
+
+	pool_glb->config.pkt_base_align = align;
+	ODP_PRINT("  %s: %u\n", str, align);
+
+	str = "pool.buf.min_align";
+	if (!_odp_libconfig_lookup_int(str, &val)) {
+		ODP_ERR("Config option '%s' not found.\n", str);
+		return -1;
+	}
+
+	align = val;
+	if (val == 0)
+		align = ODP_CACHE_LINE_SIZE;
+
+	if (!CHECK_IS_POWER2(align)) {
+		ODP_ERR("Not a power of two: %s = %i\n", str, val);
+		return -1;
+	}
+
+	pool_glb->config.buf_min_align = align;
+	ODP_PRINT("  %s: %u\n", str, align);
 
 	ODP_PRINT("\n");
 
 	return 0;
 }
 
-int odp_pool_init_global(void)
+int _odp_pool_init_global(void)
 {
 	uint32_t i;
 	odp_shm_t shm;
 
 	shm = odp_shm_reserve("_odp_pool_table",
-			      sizeof(pool_table_t),
+			      sizeof(pool_global_t),
 			      ODP_CACHE_LINE_SIZE,
 			      0);
 
-	pool_tbl = odp_shm_addr(shm);
+	_odp_pool_glb = odp_shm_addr(shm);
 
-	if (pool_tbl == NULL)
+	if (_odp_pool_glb == NULL)
 		return -1;
 
-	memset(pool_tbl, 0, sizeof(pool_table_t));
-	pool_tbl->shm = shm;
+	memset(_odp_pool_glb, 0, sizeof(pool_global_t));
+	_odp_pool_glb->shm = shm;
 
-	if (read_config_file(pool_tbl)) {
+	if (read_config_file(_odp_pool_glb)) {
 		odp_shm_free(shm);
+		_odp_pool_glb = NULL;
 		return -1;
 	}
 
@@ -248,12 +280,15 @@ int odp_pool_init_global(void)
 	return 0;
 }
 
-int odp_pool_term_global(void)
+int _odp_pool_term_global(void)
 {
 	int i;
 	pool_t *pool;
 	int ret = 0;
 	int rc = 0;
+
+	if (_odp_pool_glb == NULL)
+		return 0;
 
 	for (i = 0; i < ODP_CONFIG_POOLS; i++) {
 		pool = pool_entry(i);
@@ -266,16 +301,16 @@ int odp_pool_term_global(void)
 		UNLOCK(&pool->lock);
 	}
 
-	ret = odp_shm_free(pool_tbl->shm);
+	ret = odp_shm_free(_odp_pool_glb->shm);
 	if (ret < 0) {
-		ODP_ERR("shm free failed");
+		ODP_ERR("SHM free failed\n");
 		rc = -1;
 	}
 
 	return rc;
 }
 
-int odp_pool_init_local(void)
+int _odp_pool_init_local(void)
 {
 	pool_t *pool;
 	int i;
@@ -293,7 +328,7 @@ int odp_pool_init_local(void)
 	return 0;
 }
 
-int odp_pool_term_local(void)
+int _odp_pool_term_local(void)
 {
 	int i;
 
@@ -412,20 +447,19 @@ static void init_buffers(pool_t *pool)
 		buf_hdr->event_type = type;
 		buf_hdr->pool_ptr = pool;
 		buf_hdr->uarea_addr = uarea;
-		buf_hdr->segcount = 1;
-		buf_hdr->num_seg  = 1;
-		buf_hdr->next_seg = NULL;
-		buf_hdr->last_seg = buf_hdr;
 
-		/* Pointer to data start (of the first segment) */
-		buf_hdr->seg[0].hdr       = buf_hdr;
-		buf_hdr->seg[0].data      = &data[offset];
-		buf_hdr->seg[0].len       = pool->seg_len;
+		/* Initialize segmentation metadata */
+		if (type == ODP_POOL_PACKET) {
+			pkt_hdr->seg_data = &data[offset];
+			pkt_hdr->seg_len  = pool->seg_len;
+			pkt_hdr->seg_count = 1;
+			pkt_hdr->seg_next = NULL;
+		}
 
 		odp_atomic_init_u32(&buf_hdr->ref_cnt, 0);
 
 		/* Store base values for fast init */
-		buf_hdr->base_data = buf_hdr->seg[0].data;
+		buf_hdr->base_data = &data[offset];
 		buf_hdr->buf_end   = &data[offset + pool->seg_len +
 				     pool->tailroom];
 
@@ -468,16 +502,20 @@ static odp_pool_t pool_create(const char *name, odp_pool_param_t *params,
 
 	align = 0;
 
-	if (params->type == ODP_POOL_BUFFER)
-		align = params->buf.align;
+	if (params->type == ODP_POOL_PACKET) {
+		align = _odp_pool_glb->config.pkt_base_align;
+	} else {
+		if (params->type == ODP_POOL_BUFFER)
+			align = params->buf.align;
 
-	if (align < BUFFER_ALIGN_MIN)
-		align = BUFFER_ALIGN_MIN;
+		if (align < _odp_pool_glb->config.buf_min_align)
+			align = _odp_pool_glb->config.buf_min_align;
+	}
 
 	/* Validate requested buffer alignment */
 	if (align > ODP_CONFIG_BUFFER_ALIGN_MAX ||
 	    align != ROUNDDOWN_POWER2(align, align)) {
-		ODP_ERR("Bad align requirement");
+		ODP_ERR("Bad align requirement\n");
 		return ODP_POOL_INVALID;
 	}
 
@@ -495,7 +533,7 @@ static odp_pool_t pool_create(const char *name, odp_pool_param_t *params,
 
 	case ODP_POOL_PACKET:
 		if (params->pkt.headroom > CONFIG_PACKET_HEADROOM) {
-			ODP_ERR("Packet headroom size not supported.");
+			ODP_ERR("Packet headroom size not supported\n");
 			return ODP_POOL_INVALID;
 		}
 
@@ -514,11 +552,10 @@ static odp_pool_t pool_create(const char *name, odp_pool_param_t *params,
 		 * pool. */
 		if (params->pkt.max_len != 0)
 			max_len = params->pkt.max_len;
-		if ((max_len + seg_len - 1) / seg_len > CONFIG_PACKET_MAX_SEGS)
-			seg_len = (max_len + CONFIG_PACKET_MAX_SEGS - 1) /
-				CONFIG_PACKET_MAX_SEGS;
+		if ((max_len + seg_len - 1) / seg_len > PKT_MAX_SEGS)
+			seg_len = (max_len + PKT_MAX_SEGS - 1) / PKT_MAX_SEGS;
 		if (seg_len > CONFIG_PACKET_MAX_SEG_LEN) {
-			ODP_ERR("Pool unable to store 'max_len' packet");
+			ODP_ERR("Pool unable to store 'max_len' packet\n");
 			return ODP_POOL_INVALID;
 		}
 
@@ -533,7 +570,7 @@ static odp_pool_t pool_create(const char *name, odp_pool_param_t *params,
 		break;
 
 	default:
-		ODP_ERR("Bad pool type");
+		ODP_ERR("Bad pool type\n");
 		return ODP_POOL_INVALID;
 	}
 
@@ -543,7 +580,7 @@ static odp_pool_t pool_create(const char *name, odp_pool_param_t *params,
 	pool = reserve_pool(shmflags);
 
 	if (pool == NULL) {
-		ODP_ERR("No more free pools");
+		ODP_ERR("No more free pools\n");
 		return ODP_POOL_INVALID;
 	}
 
@@ -560,11 +597,27 @@ static odp_pool_t pool_create(const char *name, odp_pool_param_t *params,
 	strcpy(&uarea_name[name_len], postfix);
 
 	pool->params = *params;
+	pool->block_offset = 0;
 
 	if (params->type == ODP_POOL_PACKET) {
+		uint32_t dpdk_obj_size;
+
 		hdr_size = ROUNDUP_CACHE_LINE(sizeof(odp_packet_hdr_t));
-		block_size = ROUNDUP_CACHE_LINE(hdr_size + align + headroom +
-						seg_len + tailroom);
+		block_size = hdr_size + align + headroom + seg_len + tailroom;
+		/* Calculate extra space required for storing DPDK objects and
+		 * mbuf headers. NOP if no DPDK pktio used or zero-copy mode is
+		 * disabled. */
+		dpdk_obj_size = _odp_dpdk_pool_obj_size(pool, block_size);
+		if (!dpdk_obj_size) {
+			ODP_ERR("Calculating DPDK mempool obj size failed\n");
+			return ODP_POOL_INVALID;
+		}
+		if (dpdk_obj_size != block_size) {
+			shmflags |= ODP_SHM_HP;
+			block_size = dpdk_obj_size;
+		} else {
+			block_size = ROUNDUP_CACHE_LINE(block_size);
+		}
 	} else {
 		/* Header size is rounded up to cache line size, so the
 		 * following data can be cache line aligned without extra
@@ -577,22 +630,6 @@ static odp_pool_t pool_create(const char *name, odp_pool_param_t *params,
 				ROUNDUP_CACHE_LINE(sizeof(odp_timeout_hdr_t));
 
 		block_size = ROUNDUP_CACHE_LINE(hdr_size + align_pad + seg_len);
-	}
-
-	/* Calculate extra space required for storing DPDK objects and mbuf
-	 * headers. NOP if zero-copy is disabled. */
-	pool->block_offset = 0;
-	if (params->type == ODP_POOL_PACKET) {
-		uint32_t dpdk_obj_size;
-
-		dpdk_obj_size = _odp_dpdk_pool_obj_size(pool, block_size);
-		if (!dpdk_obj_size) {
-			ODP_ERR("Calculating DPDK mempool obj size failed\n");
-			return ODP_POOL_INVALID;
-		}
-		if (dpdk_obj_size != block_size)
-			shmflags |= ODP_SHM_HP;
-		block_size = dpdk_obj_size;
 	}
 
 	/* Allocate extra memory for skipping packet buffers which cross huge
@@ -631,7 +668,7 @@ static odp_pool_t pool_create(const char *name, odp_pool_param_t *params,
 	pool->shm = shm;
 
 	if (shm == ODP_SHM_INVALID) {
-		ODP_ERR("Shm reserve failed");
+		ODP_ERR("SHM reserve failed\n");
 		goto error;
 	}
 
@@ -647,7 +684,7 @@ static odp_pool_t pool_create(const char *name, odp_pool_param_t *params,
 		pool->uarea_shm = shm;
 
 		if (shm == ODP_SHM_INVALID) {
-			ODP_ERR("Shm reserve failed (uarea)");
+			ODP_ERR("SHM reserve failed (uarea)\n");
 			goto error;
 		}
 
@@ -682,7 +719,7 @@ static int check_params(odp_pool_param_t *params)
 {
 	odp_pool_capability_t capa;
 	odp_bool_t cache_warning = false;
-	uint32_t cache_size = pool_tbl->config.local_cache_size;
+	uint32_t cache_size = _odp_pool_glb->config.local_cache_size;
 	int num_threads = odp_global_ro.init_param.num_control +
 				odp_global_ro.init_param.num_worker;
 
@@ -690,7 +727,7 @@ static int check_params(odp_pool_param_t *params)
 		return -1;
 
 	if (num_threads)
-		cache_size = num_threads * pool_tbl->config.local_cache_size;
+		cache_size = num_threads * cache_size;
 
 	switch (params->type) {
 	case ODP_POOL_BUFFER:
@@ -1052,31 +1089,33 @@ void odp_buffer_free_multi(const odp_buffer_t buf[], int num)
 int odp_pool_capability(odp_pool_capability_t *capa)
 {
 	uint32_t max_seg_len = CONFIG_PACKET_MAX_SEG_LEN;
+	/* Reserve one for internal usage */
+	int max_pools = ODP_CONFIG_POOLS - 1;
 
 	memset(capa, 0, sizeof(odp_pool_capability_t));
 
-	capa->max_pools = ODP_CONFIG_POOLS;
+	capa->max_pools = max_pools;
 
 	/* Buffer pools */
-	capa->buf.max_pools = ODP_CONFIG_POOLS;
+	capa->buf.max_pools = max_pools;
 	capa->buf.max_align = ODP_CONFIG_BUFFER_ALIGN_MAX;
 	capa->buf.max_size  = MAX_SIZE;
 	capa->buf.max_num   = CONFIG_POOL_MAX_NUM;
 
 	/* Packet pools */
-	capa->pkt.max_pools        = ODP_CONFIG_POOLS;
+	capa->pkt.max_pools        = max_pools;
 	capa->pkt.max_len          = CONFIG_PACKET_MAX_LEN;
-	capa->pkt.max_num	   = pool_tbl->config.pkt_max_num;
+	capa->pkt.max_num	   = _odp_pool_glb->config.pkt_max_num;
 	capa->pkt.min_headroom     = CONFIG_PACKET_HEADROOM;
 	capa->pkt.max_headroom     = CONFIG_PACKET_HEADROOM;
 	capa->pkt.min_tailroom     = CONFIG_PACKET_TAILROOM;
-	capa->pkt.max_segs_per_pkt = CONFIG_PACKET_MAX_SEGS;
+	capa->pkt.max_segs_per_pkt = PKT_MAX_SEGS;
 	capa->pkt.min_seg_len      = CONFIG_PACKET_SEG_LEN_MIN;
 	capa->pkt.max_seg_len      = max_seg_len;
 	capa->pkt.max_uarea_size   = MAX_SIZE;
 
 	/* Timeout pools */
-	capa->tmo.max_pools = ODP_CONFIG_POOLS;
+	capa->tmo.max_pools = max_pools;
 	capa->tmo.max_num   = CONFIG_POOL_MAX_NUM;
 
 	return 0;

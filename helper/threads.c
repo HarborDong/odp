@@ -5,8 +5,6 @@
  * SPDX-License-Identifier:     BSD-3-Clause
  */
 
-#include "config.h"
-
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -20,7 +18,7 @@
 
 #include <odp_api.h>
 #include <odp/helper/threads.h>
-#include "odph_debug.h"
+#include <odp/helper/odph_debug.h>
 
 #define FAILED_CPU -1
 

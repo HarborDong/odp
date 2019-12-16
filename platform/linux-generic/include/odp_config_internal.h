@@ -1,4 +1,5 @@
 /* Copyright (c) 2016-2018, Linaro Limited
+ * Copyright (c) 2019, Nokia
  * All rights reserved.
  *
  * SPDX-License-Identifier:     BSD-3-Clause
@@ -17,9 +18,9 @@ extern "C" {
 #define CONFIG_NUM_CPU 256
 
 /*
- * Maximum number of pools
+ * Maximum number of pools. Limited by ISHM_MAX_NB_BLOCKS.
  */
-#define ODP_CONFIG_POOLS 64
+#define ODP_CONFIG_POOLS 55
 
 /*
  * Queues reserved for ODP internal use
@@ -87,21 +88,6 @@ extern "C" {
  * consider any unused portion of the last segment of a packet as tailroom
  */
 #define CONFIG_PACKET_TAILROOM 0
-
-/*
- * Maximum number of segments per packet
- */
-#define CONFIG_PACKET_MAX_SEGS 255
-
-/*
- * Packet segmentation disabled
- */
-#define CONFIG_PACKET_SEG_DISABLED (CONFIG_PACKET_MAX_SEGS == 1)
-
-/*
- * Number of segments stored in a packet header
- */
-#define CONFIG_PACKET_SEGS_PER_HDR 6
 
 /*
  * Maximum packet data length in bytes

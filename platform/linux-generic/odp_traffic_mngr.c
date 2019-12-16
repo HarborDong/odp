@@ -6,7 +6,6 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include "config.h"
 #include <odp_posix_extensions.h>
 
 #include <stdint.h>
@@ -31,6 +30,7 @@
 #include <odp_macros_internal.h>
 #include <odp_init_internal.h>
 #include <odp_errno_define.h>
+#include <odp_global_data.h>
 
 /* Local vars */
 static const
@@ -2919,7 +2919,7 @@ odp_tm_t odp_tm_create(const char            *name,
 	uint32_t max_tm_queues, max_sorted_lists;
 	int rc;
 
-	if (odp_global_ro.init_param.not_used.feat.tm) {
+	if (odp_global_ro.disable.traffic_mngr) {
 		ODP_ERR("TM has been disabled\n");
 		return ODP_TM_INVALID;
 	}
@@ -4721,12 +4721,12 @@ void odp_tm_stats_print(odp_tm_t odp_tm)
 	}
 }
 
-int odp_tm_init_global(void)
+int _odp_tm_init_global(void)
 {
 	odp_shm_t shm;
 
-	if (odp_global_ro.init_param.not_used.feat.tm) {
-		ODP_DBG("TM disabled\n");
+	if (odp_global_ro.disable.traffic_mngr) {
+		ODP_PRINT("\nODP traffic manager is DISABLED\n");
 		return 0;
 	}
 
@@ -4757,9 +4757,9 @@ int odp_tm_init_global(void)
 	return 0;
 }
 
-int odp_tm_term_global(void)
+int _odp_tm_term_global(void)
 {
-	if (odp_global_ro.init_param.not_used.feat.tm)
+	if (odp_global_ro.disable.traffic_mngr)
 		return 0;
 
 	if (odp_shm_free(tm_glb->shm)) {

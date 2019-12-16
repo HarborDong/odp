@@ -5,8 +5,6 @@
  * SPDX-License-Identifier:	 BSD-3-Clause
  */
 
-#include "config.h"
-
 #include <odp_api.h>
 #include <odp_cunit_common.h>
 #include <unistd.h>
@@ -463,6 +461,7 @@ static void ipsec_check_packet(const ipsec_test_packet *itp, odp_packet_t pkt,
 	uint8_t data[len];
 	const odph_ipv4hdr_t *itp_ip;
 	odph_ipv4hdr_t *ip;
+	int inline_mode = 0;
 
 	if (NULL == itp)
 		return;
@@ -471,7 +470,18 @@ static void ipsec_check_packet(const ipsec_test_packet *itp, odp_packet_t pkt,
 	if (ODP_PACKET_INVALID == pkt)
 		return;
 
-	CU_ASSERT_EQUAL(PACKET_USER_PTR, odp_packet_user_ptr(pkt));
+	if ((!is_outbound &&
+	     suite_context.inbound_op_mode == ODP_IPSEC_OP_MODE_INLINE) ||
+	    (is_outbound &&
+	     suite_context.outbound_op_mode == ODP_IPSEC_OP_MODE_INLINE))
+		inline_mode = 1;
+
+	if (inline_mode) {
+		/* User pointer is reset during inline mode (packet IO) */
+		CU_ASSERT(odp_packet_user_ptr(pkt) == NULL);
+	} else {
+		CU_ASSERT(odp_packet_user_ptr(pkt) == PACKET_USER_PTR);
+	}
 
 	l3 = odp_packet_l3_offset(pkt);
 	l4 = odp_packet_l4_offset(pkt);
@@ -885,36 +895,25 @@ int ipsec_suite_init(void)
 	return rc < 0 ? -1 : 0;
 }
 
-static int ipsec_suite_term(odp_testinfo_t *suite)
+static int ipsec_suite_term(void)
 {
-	int i;
-	int first = 1;
-
 	if (suite_context.pktio != ODP_PKTIO_INVALID)
 		pktio_stop(suite_context.pktio);
 
-	for (i = 0; suite[i].name; i++) {
-		if (suite[i].check_active &&
-		    suite[i].check_active() == ODP_TEST_INACTIVE) {
-			if (first) {
-				first = 0;
-				printf("\n\n  Inactive tests:\n");
-			}
-			printf("    %s\n", suite[i].name);
-		}
-	}
+	if (odp_cunit_print_inactive())
+		return -1;
 
 	return 0;
 }
 
 int ipsec_in_term(void)
 {
-	return ipsec_suite_term(ipsec_in_suite);
+	return ipsec_suite_term();
 }
 
 int ipsec_out_term(void)
 {
-	return ipsec_suite_term(ipsec_out_suite);
+	return ipsec_suite_term();
 }
 
 int ipsec_init(odp_instance_t *inst)
